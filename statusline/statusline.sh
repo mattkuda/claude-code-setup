@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code Status Line
-# Shows: [Model] Context% (tokens) | 📁 Directory | 🌿 Git Branch | ⏱️ Session Duration
+# Shows: [Model] Context% (tokens) | 📁 Directory | 🌿 Git Branch | ⏱️ Since Last Message
 #
 # Install: Add to ~/.claude/settings.json:
 # {
@@ -78,31 +78,75 @@ else
     GIT_DISPLAY=""
 fi
 
-# Session duration tracking (resets per session)
-SESSION_ID=$(echo "$input" | jq -r '.session_id // "default"')
-SESSION_FILE="$HOME/.claude/statusline/session-$SESSION_ID.time"
-
-mkdir -p "$HOME/.claude/statusline"
-
-# Get or set session start time
-if [ -f "$SESSION_FILE" ]; then
-    START_TIME=$(cat "$SESSION_FILE")
-else
-    START_TIME=$(date +%s)
-    echo "$START_TIME" > "$SESSION_FILE"
-fi
-
-# Calculate session duration
+# Time since the user's last sent message.
+# The transcript records every entry with an ISO timestamp. A message the user
+# typed is type=="user" whose content[0].type=="text"; tool results are also
+# type=="user" but start with "tool_result", so we exclude those.
 CURRENT_TIME=$(date +%s)
-DURATION=$((CURRENT_TIME - START_TIME))
-MINUTES=$((DURATION / 60))
-if [ "$MINUTES" -lt 60 ]; then
-    TIME_DISPLAY="⏱️ ${MINUTES}m"
-else
-    HOURS=$((MINUTES / 60))
-    REMAINING_MINS=$((MINUTES % 60))
-    TIME_DISPLAY="⏱️ ${HOURS}h${REMAINING_MINS}m"
+START_TIME=""
+
+TRANSCRIPT=$(echo "$input" | jq -r '.transcript_path // empty')
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+    LAST_MSG_TS=$(jq -rc 'select(.type=="user"
+        and (.message.content | type=="array")
+        and (.message.content[0].type=="text"))
+        | .timestamp' "$TRANSCRIPT" 2>/dev/null | tail -1)
+    if [ -n "$LAST_MSG_TS" ] && [ "$LAST_MSG_TS" != "null" ]; then
+        # ISO8601 UTC, e.g. 2026-06-07T12:43:03.326Z → strip fraction + Z, parse as UTC.
+        CLEAN_TS=${LAST_MSG_TS%.*}; CLEAN_TS=${CLEAN_TS%Z}
+        START_TIME=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$CLEAN_TS" +%s 2>/dev/null)
+    fi
 fi
+
+# Fallback: per-session start time (if transcript/timestamp unavailable).
+if [ -z "$START_TIME" ]; then
+    SESSION_ID=$(echo "$input" | jq -r '.session_id // "default"')
+    SESSION_FILE="$HOME/.claude/statusline/session-$SESSION_ID.time"
+    mkdir -p "$HOME/.claude/statusline"
+    if [ -f "$SESSION_FILE" ]; then
+        START_TIME=$(cat "$SESSION_FILE")
+    else
+        START_TIME=$CURRENT_TIME
+        echo "$START_TIME" > "$SESSION_FILE"
+    fi
+fi
+
+# Format as a short, human-readable timestamp of the last message:
+#   <60s  -> "just now"
+#   <60m  -> "13m ago"
+#   today -> "Today 6:15 am"
+#   yest. -> "Yesterday 5:50 am"
+#   2-6d  -> "3 days ago"
+#   >=7d  -> "Apr 17th"
+DURATION=$((CURRENT_TIME - START_TIME))
+if [ "$DURATION" -lt 60 ]; then
+    HUMAN="just now"
+elif [ "$DURATION" -lt 3600 ]; then
+    HUMAN="$((DURATION / 60))m ago"
+else
+    # Calendar-day difference in local time (not just hours elapsed).
+    TODAY_MID=$(date -v0H -v0M -v0S +%s)
+    MSG_MID=$(date -r "$START_TIME" -v0H -v0M -v0S +%s)
+    DAYS_AGO=$(( (TODAY_MID - MSG_MID) / 86400 ))
+    # Local clock time, no leading zero, lowercase am/pm: "6:15 am"
+    CLOCK=$(date -r "$START_TIME" "+%I:%M %p" | sed 's/^0//' | tr '[:upper:]' '[:lower:]')
+    if [ "$DAYS_AGO" -le 0 ]; then
+        HUMAN="Today $CLOCK"
+    elif [ "$DAYS_AGO" -eq 1 ]; then
+        HUMAN="Yesterday $CLOCK"
+    elif [ "$DAYS_AGO" -lt 7 ]; then
+        HUMAN="${DAYS_AGO} days ago"
+    else
+        MON=$(date -r "$START_TIME" "+%b")
+        DAY=$(date -r "$START_TIME" "+%d" | sed 's/^0//')
+        case "$DAY" in
+            11|12|13) SUF="th";;
+            *) case $((DAY % 10)) in 1) SUF="st";; 2) SUF="nd";; 3) SUF="rd";; *) SUF="th";; esac;;
+        esac
+        HUMAN="${MON} ${DAY}${SUF}"
+    fi
+fi
+TIME_DISPLAY="⏱️ $HUMAN"
 
 # Build model segment (with effort level if known)
 if [ -n "$EFFORT" ]; then

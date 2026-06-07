@@ -29,7 +29,7 @@ If unsure, ask: "Do you want this as HTML you can open, or Markdown?"
 
 - Write to `./plans/<slug>.html` by default (create the dir if missing). Use `./design-system.html` for design systems.
 - Single self-contained file: inline CSS, inline JS, no external deps except CDN Tailwind if helpful.
-- After writing, tell the user the path and offer to open it: `open ./plans/<slug>.html`
+- After writing, end your reply with the file's **absolute path as a clickable `file://` link on its own line** — resolve the relative path against the cwd, e.g. `file:///Users/you/project/plans/<slug>.html`. The user can ⌘-click it to open in Chrome, or copy-paste it into the address bar. Also offer the shell shortcut: `open ./plans/<slug>.html`.
 - Never commit unless asked. These are working artifacts, not source-of-truth docs.
 
 ## Style baseline (so every artifact looks deliberate, not generic)
@@ -40,6 +40,14 @@ If unsure, ask: "Do you want this as HTML you can open, or Markdown?"
 - Code excerpts in `<pre><code>` with a subtle gray background. Syntax highlight only if it's load-bearing.
 - Mockups as inline SVG or styled HTML — not ASCII art.
 - No emojis unless the user used them first.
+
+## Style references
+
+Before writing, read one of the example files in `<skill-dir>/examples/` (typically `~/.claude/skills/html-spec/examples/`) that matches the task and crib its structure, CSS baseline, and component patterns. Don't link to it from the output — copy the patterns inline.
+
+- `examples/brainstorm.html` — fan-out option grid
+- `examples/plan.html` — implementation plan with mockups and `<details>`
+- `examples/design-system.html` — token + component reference
 
 ## Templates (pick one based on the task)
 

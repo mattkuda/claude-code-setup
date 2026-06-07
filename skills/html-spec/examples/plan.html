@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Plan — Postgres full-text search for candidates</title>
+<style>
+  :root {
+    --fg: #18181b;
+    --muted: #71717a;
+    --line: #e4e4e7;
+    --bg: #fafafa;
+    --card: #ffffff;
+    --accent: #18181b;
+    --code-bg: #f4f4f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 56px 32px 80px; }
+  h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 8px; }
+  h2 { font-size: 20px; font-weight: 600; margin: 48px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--muted); font-size: 17px; }
+  .tldr {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    margin-top: 32px;
+  }
+  .tldr p:last-child { margin-bottom: 0; }
+  pre {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 12px 0;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre code { background: transparent; padding: 0; }
+  details {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 8px 0;
+    background: var(--card);
+  }
+  details[open] { padding-bottom: 16px; }
+  summary { cursor: pointer; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  th { font-weight: 600; color: var(--muted); }
+  .mock {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 16px 0;
+  }
+  .mock svg { width: 100%; height: auto; display: block; }
+  ul { margin: 8px 0 16px; padding-left: 20px; }
+  li { margin: 4px 0; }
+  .pill {
+    display: inline-block;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--code-bg);
+    color: var(--muted);
+    margin-right: 6px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Postgres full-text search for candidates</h1>
+  <p class="lede">Replace the current <code>ILIKE %query%</code> search with a tsvector-backed search that ranks by relevance and handles typos. Ship behind a feature flag.</p>
+
+  <div class="tldr">
+    <p><strong>TL;DR.</strong> Add a generated <code>tsv</code> column to <code>candidates</code>, GIN-index it, swap the search endpoint to use <code>websearch_to_tsquery</code> + <code>ts_rank</code>, ship behind <code>ff_pg_fts</code>. Falls back to ILIKE on the flag-off path.</p>
+    <p><span class="pill">Effort: 1 day</span><span class="pill">Risk: low</span><span class="pill">Owner: backend</span></p>
+  </div>
+
+  <h2>Success criteria</h2>
+  <ul>
+    <li>Search "softwre enginer" returns Software Engineer candidates (typo tolerance via trigram fallback).</li>
+    <li>p95 latency on a 50k-row table stays under 150ms.</li>
+    <li>Ranking surfaces exact-name matches before substring matches.</li>
+    <li>Feature flag flip is reversible without a migration.</li>
+  </ul>
+
+  <h2>Data model</h2>
+  <pre><code>-- migration
+ALTER TABLE candidates ADD COLUMN tsv tsvector
+  GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce(name, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(headline, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(skills, '')), 'C')
+  ) STORED;
+
+CREATE INDEX candidates_tsv_idx ON candidates USING GIN (tsv);
+CREATE INDEX candidates_name_trgm_idx ON candidates USING GIN (name gin_trgm_ops);</code></pre>
+
+  <h2>API change</h2>
+  <p>The existing <code>GET /api/candidates?q=</code> endpoint changes its query body. Response shape stays the same.</p>
+  <pre><code>// src/app/api/candidates/route.ts
+const useFts = await flags.enabled('ff_pg_fts', userId);
+const { data } = useFts
+  ? await supabase.rpc('search_candidates_fts', { q })
+  : await supabase
+      .from('candidates')
+      .select('*')
+      .ilike('name', `%${q}%`);</code></pre>
+
+  <details>
+    <summary>RPC body (search_candidates_fts)</summary>
+    <pre><code>CREATE OR REPLACE FUNCTION search_candidates_fts(q text)
+RETURNS SETOF candidates AS $$
+  SELECT *
+  FROM candidates
+  WHERE tsv @@ websearch_to_tsquery('english', q)
+     OR name % q
+  ORDER BY ts_rank(tsv, websearch_to_tsquery('english', q)) DESC,
+           similarity(name, q) DESC
+  LIMIT 50;
+$$ LANGUAGE sql STABLE;</code></pre>
+  </details>
+
+  <h2>UI</h2>
+  <div class="mock">
+    <svg viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg">
+      <rect width="800" height="200" fill="#fafafa"/>
+      <rect x="40" y="30" width="720" height="40" rx="6" fill="#ffffff" stroke="#e4e4e7"/>
+      <text x="56" y="55" font-family="Inter, sans-serif" font-size="14" fill="#71717a">softwre enginer</text>
+      <rect x="40" y="90" width="720" height="42" rx="6" fill="#ffffff" stroke="#e4e4e7"/>
+      <circle cx="62" cy="111" r="12" fill="#18181b"/>
+      <text x="86" y="108" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#18181b">Jane Doe — Software Engineer</text>
+      <text x="86" y="124" font-family="Inter, sans-serif" font-size="12" fill="#71717a">React, TypeScript, 8y · matched on name + headline</text>
+      <rect x="40" y="140" width="720" height="42" rx="6" fill="#ffffff" stroke="#e4e4e7"/>
+      <circle cx="62" cy="161" r="12" fill="#a1a1aa"/>
+      <text x="86" y="158" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#18181b">John Smith — Senior Software Engineer</text>
+      <text x="86" y="174" font-family="Inter, sans-serif" font-size="12" fill="#71717a">Go, distributed systems · matched on headline</text>
+    </svg>
+  </div>
+
+  <h2>File changes</h2>
+  <table>
+    <tr><th>File</th><th>Change</th></tr>
+    <tr><td><code>supabase/migrations/0042_candidates_fts.sql</code></td><td>new — generated column + indexes + RPC</td></tr>
+    <tr><td><code>src/app/api/candidates/route.ts</code></td><td>branch on <code>ff_pg_fts</code> flag</td></tr>
+    <tr><td><code>src/hooks/use-candidate-search.ts</code></td><td>no change (response shape preserved)</td></tr>
+    <tr><td><code>src/lib/flags.ts</code></td><td>register <code>ff_pg_fts</code></td></tr>
+  </table>
+
+  <h2>Test plan</h2>
+  <ol>
+    <li>Migration applies cleanly on a snapshot of prod (impzjxjimjpacvuworni).</li>
+    <li>RPC returns Jane Doe for query "softwre enginer".</li>
+    <li>p95 latency on 50k synthetic rows &lt; 150ms (run from <code>scripts/bench-search.ts</code>).</li>
+    <li>Flag off → behavior is byte-identical to today.</li>
+    <li>Flag flip live during a 5-minute window with monitoring.</li>
+  </ol>
+
+  <h2>Open questions</h2>
+  <details>
+    <summary>Do we need per-tenant ranking weights?</summary>
+    <p>Not for v1. The weight tuple (A=name, B=headline, C=skills) is hardcoded. If recruiters complain that skills should rank higher for technical searches, we can move weights to a user setting later.</p>
+  </details>
+  <details>
+    <summary>What about positions and companies search?</summary>
+    <p>Out of scope. Once this ships and proves out, copy the same pattern to <code>positions</code> and <code>companies</code> in a follow-up PR.</p>
+  </details>
+</main>
+</body>
+</html>
