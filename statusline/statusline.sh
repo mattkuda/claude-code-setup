@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code Status Line
-# Shows: [Model] Context% (tokens) | 📁 Directory | 🌿 Git Branch | ⏱️ Since Last Message
+# Shows: [Model] Context% (tokens) | 📁 Directory | 🌿 Git Branch | ⏱️ Last Message Time
 #
 # Install: Add to ~/.claude/settings.json:
 # {
@@ -111,42 +111,15 @@ if [ -z "$START_TIME" ]; then
     fi
 fi
 
-# Format as a short, human-readable timestamp of the last message:
-#   <60s  -> "just now"
-#   <60m  -> "13m ago"
-#   today -> "Today 6:15 am"
-#   yest. -> "Yesterday 5:50 am"
-#   2-6d  -> "3 days ago"
-#   >=7d  -> "Apr 17th"
-DURATION=$((CURRENT_TIME - START_TIME))
-if [ "$DURATION" -lt 60 ]; then
-    HUMAN="just now"
-elif [ "$DURATION" -lt 3600 ]; then
-    HUMAN="$((DURATION / 60))m ago"
-else
-    # Calendar-day difference in local time (not just hours elapsed).
-    TODAY_MID=$(date -v0H -v0M -v0S +%s)
-    MSG_MID=$(date -r "$START_TIME" -v0H -v0M -v0S +%s)
-    DAYS_AGO=$(( (TODAY_MID - MSG_MID) / 86400 ))
-    # Local clock time, no leading zero, lowercase am/pm: "6:15 am"
-    CLOCK=$(date -r "$START_TIME" "+%I:%M %p" | sed 's/^0//' | tr '[:upper:]' '[:lower:]')
-    if [ "$DAYS_AGO" -le 0 ]; then
-        HUMAN="Today $CLOCK"
-    elif [ "$DAYS_AGO" -eq 1 ]; then
-        HUMAN="Yesterday $CLOCK"
-    elif [ "$DAYS_AGO" -lt 7 ]; then
-        HUMAN="${DAYS_AGO} days ago"
-    else
-        MON=$(date -r "$START_TIME" "+%b")
-        DAY=$(date -r "$START_TIME" "+%d" | sed 's/^0//')
-        case "$DAY" in
-            11|12|13) SUF="th";;
-            *) case $((DAY % 10)) in 1) SUF="st";; 2) SUF="nd";; 3) SUF="rd";; *) SUF="th";; esac;;
-        esac
-        HUMAN="${MON} ${DAY}${SUF}"
-    fi
-fi
-TIME_DISPLAY="⏱️ $HUMAN"
+# Absolute timestamp of the user's last message — e.g. "Apr 14, 3:45pm".
+# Deliberately absolute, not relative ("35m ago"): the status line only
+# re-renders on Claude Code's refresh cadence, so a relative value freezes
+# when you switch away and come back. An absolute timestamp is correct
+# whenever it was last drawn — nothing to keep updating.
+MON=$(date -r "$START_TIME" "+%b")
+DAY=$(date -r "$START_TIME" "+%d" | sed 's/^0//')
+CLOCK=$(date -r "$START_TIME" "+%I:%M%p" | sed 's/^0//' | tr '[:upper:]' '[:lower:]')
+TIME_DISPLAY="⏱️ ${MON} ${DAY}, ${CLOCK}"
 
 # Build model segment (with effort level if known)
 if [ -n "$EFFORT" ]; then
